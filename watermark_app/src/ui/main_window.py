@@ -1,7 +1,14 @@
 """
 main_window.py — PyQt5 desktop UI for PhotoWatermark Pro.
 
-Layout (three-panel splitter):
+Modes
+─────
+• Easy Mode    — single-screen, 3-step flow (drop → style → watermark).
+                 Great for first-time users.
+• Advanced Mode— three-panel tabbed layout with every option exposed.
+                 Toggle between modes via the toolbar buttons.
+
+Layout (Advanced Mode, three-panel splitter):
   ┌─────────────┬──────────────────────┬───────────────┐
   │  File List  │   Settings (Tabs)    │    Preview    │
   │  (drag+drop)│                      │               │
@@ -23,7 +30,7 @@ from PyQt5.QtWidgets import (
     QFormLayout, QLabel, QPushButton, QLineEdit, QSpinBox, QSlider, QCheckBox,
     QComboBox, QRadioButton, QButtonGroup, QListWidget, QAbstractItemView,
     QTabWidget, QScrollArea, QProgressBar, QFileDialog, QMessageBox,
-    QColorDialog, QSizePolicy, QApplication,
+    QColorDialog, QSizePolicy, QApplication, QStackedWidget,
 )
 from PyQt5.QtCore  import Qt, QThread, pyqtSignal, QTimer, QUrl, QRect
 from PyQt5.QtGui   import QPixmap, QPainter, QBrush, QColor, QPen, QFont, QIcon
@@ -39,6 +46,8 @@ from core.constants      import (
 from core.watermark_engine import WatermarkEngine
 from core.image_processor  import ImageProcessor
 from core.profile_manager  import ProfileManager
+from ui.drop_list          import DropListWidget
+from ui.easy_panel         import EasyModePanel
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -124,45 +133,7 @@ class BatchWorker(QThread):
         self.finished.emit(done, failed)
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-#  Drag-and-drop-enabled file list
-# ──────────────────────────────────────────────────────────────────────────────
-
-class DropListWidget(QListWidget):
-    """QListWidget that accepts image files dropped from Explorer."""
-
-    files_dropped = pyqtSignal(list)
-
-    def __init__(self):
-        super().__init__()
-        self.setAcceptDrops(True)
-        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.setSpacing(2)
-        self.setToolTip("Drag and drop image files or folders here")
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        paths = []
-        for url in event.mimeData().urls():
-            local = url.toLocalFile()
-            if os.path.isfile(local) and ImageProcessor.is_supported(local):
-                paths.append(local)
-            elif os.path.isdir(local):
-                # Accept entire folders
-                for fname in os.listdir(local):
-                    fp = os.path.join(local, fname)
-                    if os.path.isfile(fp) and ImageProcessor.is_supported(fp):
-                        paths.append(fp)
-        if paths:
-            self.files_dropped.emit(paths)
-
+# DropListWidget is now in ui/drop_list.py and imported at the top of this file.
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Main window
@@ -179,6 +150,10 @@ class MainWindow(QMainWindow):
       • Persist settings on close via ProfileManager.
     """
 
+    # ── Mode constants ────────────────────────────────────────────────────────
+    MODE_EASY     = 0
+    MODE_ADVANCED = 1
+
     def __init__(self):
         super().__init__()
 
@@ -192,6 +167,7 @@ class MainWindow(QMainWindow):
         self.worker     = None         # Active BatchWorker (or None)
         self.output_dir = OUTPUT_DIR
         self._color     = "#FFFFFF"    # Currently selected watermark colour
+        self._mode      = self.MODE_EASY  # Start in Easy Mode by default
 
         # Load last-used config
         self.config = self.profiles.load_last_used()
@@ -204,6 +180,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._apply_stylesheet()
         self._load_config_to_ui()
+
+        # Start in Easy Mode
+        self._switch_mode(self.MODE_EASY)
 
     # ──────────────────────── App icon (programmatic) ─────────────────────────
 
@@ -232,14 +211,29 @@ class MainWindow(QMainWindow):
 
         root.addWidget(self._build_toolbar())
 
+        # ── Mode stack: index 0 = Easy, index 1 = Advanced ────────────────
+        self.mode_stack = QStackedWidget()
+
+        # Easy Mode panel
+        self.easy_panel = EasyModePanel(self.engine, self.processor)
+        self.easy_panel.process_requested.connect(self._on_easy_process)
+        self.easy_panel.files_changed.connect(self._on_easy_files_changed)
+        self.mode_stack.addWidget(self.easy_panel)   # index 0
+
+        # Advanced Mode panel (original three-panel splitter)
+        adv_widget = QWidget()
+        adv_layout = QVBoxLayout(adv_widget)
+        adv_layout.setContentsMargins(0, 0, 0, 0)
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(5)
         splitter.addWidget(self._build_file_panel())
         splitter.addWidget(self._build_settings_panel())
         splitter.addWidget(self._build_preview_panel())
         splitter.setSizes([240, 540, 360])
-        root.addWidget(splitter, 1)
+        adv_layout.addWidget(splitter)
+        self.mode_stack.addWidget(adv_widget)        # index 1
 
+        root.addWidget(self.mode_stack, 1)
         root.addWidget(self._build_status_bar())
 
     # ── Toolbar ───────────────────────────────────────────────────────────────
@@ -253,7 +247,41 @@ class MainWindow(QMainWindow):
         title = QLabel(APP_NAME)
         title.setObjectName("app_title")
         h.addWidget(title)
+
+        # ── Mode toggle (Easy / Advanced) ─────────────────────────────────
+        h.addSpacing(20)
+        mode_label = QLabel("Mode:")
+        mode_label.setObjectName("mode_label")
+        h.addWidget(mode_label)
+
+        self.btn_easy_mode = QPushButton("⚡  Easy")
+        self.btn_easy_mode.setObjectName("mode_btn_active")
+        self.btn_easy_mode.setCheckable(True)
+        self.btn_easy_mode.setChecked(True)
+        self.btn_easy_mode.setToolTip(
+            "Easy Mode — simplified 3-step interface for quick watermarking"
+        )
+        h.addWidget(self.btn_easy_mode)
+
+        self.btn_adv_mode = QPushButton("⚙  Advanced")
+        self.btn_adv_mode.setObjectName("mode_btn_inactive")
+        self.btn_adv_mode.setCheckable(True)
+        self.btn_adv_mode.setChecked(False)
+        self.btn_adv_mode.setToolTip(
+            "Advanced Mode — full control: fonts, logos, profiles, image options"
+        )
+        h.addWidget(self.btn_adv_mode)
+
+        self.btn_easy_mode.clicked.connect(lambda: self._switch_mode(self.MODE_EASY))
+        self.btn_adv_mode.clicked.connect(lambda: self._switch_mode(self.MODE_ADVANCED))
+
         h.addStretch()
+
+        # ── Advanced-mode action buttons (hidden in Easy Mode) ────────────
+        self.adv_toolbar_widget = QWidget()
+        adv_h = QHBoxLayout(self.adv_toolbar_widget)
+        adv_h.setContentsMargins(0, 0, 0, 0)
+        adv_h.setSpacing(6)
 
         self.btn_add     = QPushButton("＋  Add Files")
         self.btn_clear   = QPushButton("✕  Clear All")
@@ -264,14 +292,76 @@ class MainWindow(QMainWindow):
 
         for btn in (self.btn_add, self.btn_clear, self.btn_openout,
                     self.btn_preview, self.btn_process):
-            h.addWidget(btn)
+            adv_h.addWidget(btn)
 
         self.btn_add.clicked.connect(self._add_files_dialog)
         self.btn_clear.clicked.connect(self._clear_files)
         self.btn_openout.clicked.connect(self._open_output_folder)
         self.btn_preview.clicked.connect(self._update_preview)
         self.btn_process.clicked.connect(self._start_batch)
+
+        h.addWidget(self.adv_toolbar_widget)
+
+        # Open Output button is always visible
+        btn_out_easy = QPushButton("📂  Open Output")
+        btn_out_easy.clicked.connect(self._open_output_folder)
+        h.addWidget(btn_out_easy)
+
         return w
+
+    # ── Mode switching ────────────────────────────────────────────────────────
+
+    def _switch_mode(self, mode: int):
+        """Switch between Easy Mode (0) and Advanced Mode (1)."""
+        self._mode = mode
+
+        if mode == self.MODE_EASY:
+            # Sync files from advanced → easy
+            self.easy_panel.sync_files(self.files)
+            # Sync current config to easy panel
+            self.easy_panel.apply_config(self.config)
+            self.mode_stack.setCurrentIndex(self.MODE_EASY)
+            self.adv_toolbar_widget.setVisible(False)
+            self.btn_easy_mode.setChecked(True)
+            self.btn_adv_mode.setChecked(False)
+            self.btn_easy_mode.setObjectName("mode_btn_active")
+            self.btn_adv_mode.setObjectName("mode_btn_inactive")
+            self.lbl_status.setText("Easy Mode  —  drop photos, set text, click Watermark All Files")
+        else:
+            # Sync files from easy → advanced
+            self._sync_files_from_easy()
+            self.mode_stack.setCurrentIndex(self.MODE_ADVANCED)
+            self.adv_toolbar_widget.setVisible(True)
+            self.btn_easy_mode.setChecked(False)
+            self.btn_adv_mode.setChecked(True)
+            self.btn_easy_mode.setObjectName("mode_btn_inactive")
+            self.btn_adv_mode.setObjectName("mode_btn_active")
+            self.lbl_status.setText("Advanced Mode  —  full control over every watermark option")
+
+        # Re-apply stylesheet so ObjectName changes take effect
+        self._apply_stylesheet()
+
+    def _sync_files_from_easy(self):
+        """Copy easy panel file list into the advanced file list."""
+        easy_files = self.easy_panel.files
+        for p in easy_files:
+            if p not in self.files:
+                self.files.append(p)
+                self.file_list.addItem(os.path.basename(p))
+        self._update_count()
+
+    def _on_easy_files_changed(self, files: list):
+        """Easy panel updated its file list — keep our master list in sync."""
+        self.files = list(files)
+
+    def _on_easy_process(self, files: list, config: dict):
+        """Easy panel requested batch processing."""
+        if not files:
+            return
+        self.files = files
+        self.config = config
+        self.output_dir = OUTPUT_DIR
+        self._start_batch_with(files, config)
 
     # ── File panel ────────────────────────────────────────────────────────────
 
@@ -812,24 +902,28 @@ class MainWindow(QMainWindow):
     # ──────────────────────── Batch processing ────────────────────────────────
 
     def _start_batch(self):
+        """Called by the Advanced Mode toolbar button."""
         if not self.files:
             QMessageBox.warning(self, "No Files", "Please add at least one image.")
             return
-
         config = self._collect_config()
-        # Auto-save current settings as last-used
         self.profiles.save_last_used(config)
+        self._start_batch_with(self.files, config)
 
-        n = len(self.files)
+    def _start_batch_with(self, files: list, config: dict):
+        """Shared batch launcher used by both Easy and Advanced modes."""
+        n = len(files)
         self.progress_bar.setMaximum(n)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat(f"0 / {n}")
         self.progress_bar.setVisible(True)
         self.btn_abort.setVisible(True)
-        self.btn_process.setEnabled(False)
+        # Disable the active mode's process button if in Advanced Mode
+        if self._mode == self.MODE_ADVANCED:
+            self.btn_process.setEnabled(False)
         self.lbl_status.setText(f"Processing {n} image{'s' if n != 1 else ''}…")
 
-        self.worker = BatchWorker(self.files, config, self.output_dir)
+        self.worker = BatchWorker(files, config, self.output_dir)
         self.worker.progress.connect(
             lambda pct: (
                 self.progress_bar.setValue(round(pct / 100 * n)),
@@ -851,7 +945,8 @@ class MainWindow(QMainWindow):
     def _on_batch_done(self, done: int, failed: int):
         self.progress_bar.setVisible(False)
         self.btn_abort.setVisible(False)
-        self.btn_process.setEnabled(True)
+        if self._mode == self.MODE_ADVANCED:
+            self.btn_process.setEnabled(True)
         self.lbl_status.setText(
             f"✅  {done} watermarked"
             + (f"  ⚠ {failed} failed" if failed else "")
@@ -1136,6 +1231,28 @@ class MainWindow(QMainWindow):
             }
             #toolbar QPushButton:hover  { background: #475569; }
             #toolbar QPushButton:pressed{ background: #1E293B; }
+
+            /* ── Mode toggle buttons ── */
+            #mode_label {
+                color: #94A3B8;
+                font-size: 12px;
+                padding-right: 4px;
+            }
+            #mode_btn_active {
+                background: #2563EB !important;
+                color: white !important;
+                font-weight: bold;
+                border-radius: 5px;
+                padding: 6px 14px;
+            }
+            #mode_btn_inactive {
+                background: #334155 !important;
+                color: #94A3B8 !important;
+                border-radius: 5px;
+                padding: 6px 14px;
+            }
+            #mode_btn_inactive:hover { background: #475569 !important; color: white !important; }
+
             #primary_btn {
                 background: #2563EB !important;
                 color: white !important;
