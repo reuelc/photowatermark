@@ -30,15 +30,15 @@ from PyQt5.QtGui   import QPixmap, QPainter, QBrush, QColor, QPen, QFont, QIcon
 
 from PIL import Image
 
-from ..core.constants      import (
+from core.constants      import (
     APP_NAME, APP_VERSION, OUTPUT_DIR,
     POSITION_LABELS, POSITION_LOWER_LEFT, POSITION_LOWER_RIGHT,
     POSITION_CENTER, POSITION_DIAGONAL,
     FONT_NAMES, OUTPUT_FORMATS, REALESTATE_PRESETS,
 )
-from ..core.watermark_engine import WatermarkEngine
-from ..core.image_processor  import ImageProcessor
-from ..core.profile_manager  import ProfileManager
+from core.watermark_engine import WatermarkEngine
+from core.image_processor  import ImageProcessor
+from core.profile_manager  import ProfileManager
 
 
 # ──────────────────────────────────────────────────────────────────────────────
