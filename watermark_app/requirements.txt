@@ -1,0 +1,12 @@
+# PhotoWatermark Pro — Python dependencies
+# Install with:  pip install -r requirements.txt
+
+# GUI framework
+PyQt5>=5.15.9
+
+# Image processing (core engine)
+Pillow>=10.0.0
+
+# --- Dev / packaging (optional) ---
+# Package as a standalone Windows .exe:
+PyInstaller>=6.0.0
